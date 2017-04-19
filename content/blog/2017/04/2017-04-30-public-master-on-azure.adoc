@@ -1,6 +1,6 @@
 ---
 :layout: post
-:title: Securing a public instance of Jenkins on Azure
+:title: Securing an instance of Jenkins on Azure
 :tags:
 - master
 - azure
@@ -13,48 +13,47 @@
 NOTE: This is a guest post by link:https://github.com/clguimanMSFT[Claudiu Guiman],
 Senior Software Engineer in the link:https://azure.microsoft.com/en-us/try/devops[Azure DevOps] team at link:https://www.microsoft.com[Microsoft]
 
-One of the most asked question when it comes to managing a public Jenkins instance is "How do I make sure it's secure?".
+One of the most frequently asked questions for managing a Jenkins instance is "How do I make it secure?". Like any other  website, these primary issues must be solved:
 
-Like any other public website, Jenkins encounters the same big issues:
+* How do I securely pass secrets between the browser and the server?
+* How do I hide certain parts from unauthorized users and show other parts to anonymous users?
 
-* How do I secure the passing of secrets between the browser and the server?
-* How do I make sure certain parts can only be view by authorized users while keeping other available to any users?
+This blog post details how to securely connect to a Jenkins instance and how to setup a read-only public dashboard.
 
-While trying to answer this question for our own Jenkins master I stumbled upon many online resources. This blog post is a more structured 'How-to' which should ensure a basic to moderate secure environment.
+== Deploy Jenkins
+The simplest way to deploy a secure Jenkins instance is to use one of these Azure QuickStart templates:
 
-TIP: TL;DR: You can follow the instructions below to secure your own Jenkins instance. If you just need to quickly deploy a secured-by-default instance you can use an https://aka.ms/101-jenkins-ssh[Azure QuickStart template with SSH public key authentication] or https://aka.ms/101-jenkins-pwd[one with user name and password authentication].
+* https://aka.ms/101-jenkins-ssh[Jenkins instance on a Virtual Machine secured by SSH public key]
+* https://aka.ms/101-jenkins-pwd[Jenkins instance on a Virtual Machine secured by user name and password]
 
-== SSH tunneling
-After you've deployed your new virtual machine with a hosted Jenkins instance, you will notice that by default the instance listens to port 8080 on an HTTP connection. Unfortunately, if you want to set up a SSL connection you will need to provide a SSL certificate which isn't cheap and services like https://letsencrypt.org/[Let's Encrypt] have a very small quota on the number of azure.com sub-domains they support.
+If you have an existing Jenkins instance or want to setup your instance manually, follow the steps below.
 
-If buying a SSL certificate or self-signing (browsers hate them for very good reasons) isn't an option, then the best way to make sure the sign-in credentials are not leaked due to a https://en.wikipedia.org/wiki/Man-in-the-middle_attack[Man-in-the-middle] attack is to only log in using SSH tunneling.
-An SSH tunnel is an encrypted tunnel created through a SSH protocol connection which can be used to transfer unencrypted traffic over an unsecured network.
-The simplest way to create a tunnel is by using SSH port forwarding:
+== Securely login to Jenkins
+After you've deployed your new virtual machine with a hosted Jenkins instance, you will notice that by default the instance listens on port 8080 using 'HTTP'. If you want to set up 'HTTPS' communication, you will need to provide an SSL certificate. Unfortunately, most certificate authorities are not cheap and other free services like https://letsencrypt.org/[Let's Encrypt] have a very small quota (about 20 certificates per week for the entire 'azure.com' subdomain). The only other option is to use a self-signed certificate, but then users must explicitly verify and mark your certificate as trusted, which is not recommended.
 
+If you do not setup 'HTTPS' communication, the best way to make sure the sign-in credentials are not leaked due to a https://en.wikipedia.org/wiki/Man-in-the-middle_attack[Man-in-the-middle] attack is to only log in using SSH tunneling.
+An SSH tunnel is an encrypted tunnel created through a SSH protocol connection, which can be used to transfer unencrypted traffic over an unsecured network. Simply run this command:
 ----
-    ssh -L 8080:localhost:8080 <username>@<domain name>
+ssh -L 8080:localhost:8080 <username>@<domain name>
 ----
 
-This command will open an SSH connection to your remote host and bind remote port 8080 to listen to requests coming from your local machine.
-After the connection is established you can go to http://localhost:8080 to access your Jenkins instance and you'll be able to login in a secure way.
+This command will open an SSH connection to your remote host and bind remote port 8080 to listen to requests coming from your local machine. Navigate to http://localhost:8080 on your local machine to view your Jenkins dashboard and you'll be able to login securely.
 
-== Reverse proxy
-Now that you have a way to securely login to your Jenkins instance, you must make sure that people don't accidentally authenticate through the public unsecured interface. To achieve this, you can install a reverse proxy on the Jenkins hosting machine that will listen on a different port (port 80 is the best candidate) and redirect all requests to port 8080.
+== Setup a reverse proxy
+Now that you can securely login to your Jenkins instance, you should prevent people from accidentally authenticating through the public (unsecured) interface. To achieve this, you can setup a reverse proxy on the Jenkins hosting machine that will listen on a different port (80 is the best candidate) and redirect only certain requests to port 8080.
 
-Some of the requests like login will be filtered out so no one will be able to authenticate unless they are using a SSH tunnel. We're also disabling the CLI just to be on the safe side - some CLI version will fall back to unsecure HTTP connections if they have problem establishing the secured connection. In most cases, users don't need the CLI and it should be enabled on a per-need basis.
+Specifically, it is recommended to block the login and the CLI requests. Some CLI versions fall back to unsecure HTTP connections if they have problems establishing the secured connection. In most cases, users don't need the CLI and it should be enabled on a as-needed basis.
 
-First you need to install Nginx:
+1. Install Nginx:
 ----
     sudo apt-get update
     sudo apt-get install nginx
 ----
-
-Then you'll have to configure it to work as a reverse proxy.
+1. Open the Nginx config file:
 ----
     sudo nano /etc/nginx/sites-enabled/default
 ----
-
-This is how the file should look after editing it (you need to update <your domain name>)
+1. Modify the file to configure Nginx to work as a reverse proxy (you need to update <your domain name>):
 ----
 server {
     listen 80;
@@ -90,7 +89,7 @@ The first section tells the Nginx server to listen to any requests that come fro
     server_name <your domain name>;
     # error_page 403 /secure-jenkins;
 ----
-Next you have the reverse proxy configuration. This tells the Nginx server to take all incoming requests and proxy them to the Jenkins instance that is listening to port 8080 on the local network interface.
+The next section describes the reverse proxy configuration. This tells the Nginx server to take all incoming requests and proxy them to the Jenkins instance that is listening to port 8080 on the local network interface.
 ----
     location / {
         proxy_set_header        Host \$host:\$server_port;
@@ -111,29 +110,25 @@ The last section filters out specific URLs (login, cli) and denies access to the
         deny all;
     }
 ----
-
-After you're done writing the configuration you'll need to restart Nginx and go to `http://<your domain name>`. You should be able to access your Jenkins instance.
+1. Restart Nginx:
 ----
     sudo service nginx restart
 ----
-If restart fails or the outcome is not the desired one you can look in the error log for more information:
-----
-    cat /var/log/nginx/error.log
-----
-
-Go to `http://<your domain name>` and try to click "Login". You should get a '403 Forbidden' page. If you want to customize that page, you'll need to update the Nginx configuration and remove the comments around /secure-jenkins. This will redirect all 403 errors to `/usr/share/nginx/secure-jenkins`, so you'll need to add an html page there:
+1. Go to `http://<your domain name>` and verify you can access your Jenkins instance.
+1. Verify clicking 'login' returns a '403 Forbidden' page. If you want to customize that page, update the Nginx configuration and remove the comments around /secure-jenkins. This will redirect all 403 errors to the file `/usr/share/nginx/secure-jenkins`. You can add any content to that file, for example:
 ----
     sudo mkdir /usr/share/nginx/secure-jenkins
     echo "Access denied! Use SSH tunneling to login to your Jenkins instance!" | sudo tee /usr/share/nginx/secure-jenkins/index.html
 ----
 
-== Azure Network Security Groups
-If you go to `http://<your domain name>:8080` you'll notice you can still bypass the reverse proxy and access the Jenkins instance directly, thus being able to login through an unsecured channel. You'll need to block all inbound requests on port 8080.
-This can be easily achieved on Azure with a https://docs.microsoft.com/en-us/azure/virtual-network/virtual-networks-nsg[Network Security Group]. You'll need to add an NSG to your existing network interface or on the subnet your Azure Virtual Machine is bound to.
+TIP: If restart fails or you cannot access your instance, check the error log: `cat /var/log/nginx/error.log`
 
-Once the NSG is created you'll need to add 2 inbound security rules:
+== Secure your Jenkins dashboard
+If you go to `http://<your domain name>:8080` you'll notice you can still bypass the reverse proxy and access the Jenkins instance directly through an unsecure channel. You easily block all inbound requests on port 8080 on Azure with a https://docs.microsoft.com/azure/virtual-network/virtual-networks-nsg[Network Security Group].
 
-* Allow requests to port 22 so you can SSH into the machine and establish the SSH tunnel.
+1. Create the NSG and add it to your existing network interface or to the subnet your Azure Virtual Machine is bound to.
+1. Add 2 inbound security rules:
+* Allow requests to port 22 so you can SSH into the machine.
 
 image::/images/post-images/2017-04-30/nsg-ssh.png[role=center]
 
@@ -141,37 +136,31 @@ image::/images/post-images/2017-04-30/nsg-ssh.png[role=center]
 
 image::/images/post-images/2017-04-30/nsg-http.png[role=center]
 
-* By default, everything else, except for internal traffic, will be blocked
+> NOTE: By default, all other external traffic will be blocked
 
 image::/images/post-images/2017-04-30/nsg-inbound.png[role=center]
 
-Now requests sent to port 8080 shouldn't reach Jenkins, so going to `http://<your domain name>:8080` should be unsuccessful.
+1. Navigate to `http://<your domain name>:8080` and verify you cannot connect.
 
-NOTE: If you can't deploy an Azure Network Security Group, you can block port 8080 using the https://help.ubuntu.com/stable/ubuntu-help/net-firewall-on-off.html[Uncomplicated Firewall (ufw)]
+NOTE: If you don't want to deploy an Azure Network Security Group, you can block port 8080 using the https://help.ubuntu.com/stable/ubuntu-help/net-firewall-on-off.html[Uncomplicated Firewall (ufw)]
 
-== Authorization Matrix
-After installing Jenkins, the default security strategy is 'Logged-in users can do anything'. That means only logged in users can interact with Jenkins, so if you need to allow read-only access to other people without creating user accounts for them you'll need to set up a Matrix-based security.
+== Configure read-only access to your dashboard
+After installing Jenkins, the default security strategy is 'Logged-in users can do anything'. If you want to allow read-only access to anonymous users, you need to set up Matrix-based security. In this example, we'll set up a project-based authorization matrix, so that you can make certain projects private and others public.
 
-In this example, we'll set up a project-based authorization matrix. This allows to define an authorization matrix for each project so you can make certain projects private and other public.
-After installing the https://wiki.jenkins-ci.org/display/JENKINS/Matrix+Authorization+Strategy+Plugin[Matrix Authorization Strategy Plugin] and restarting Jenkins, you need to go to http://localhost:8080/configureSecurity/ ('Configure Global Security' page in 'Manage Jenkins') and select 'Project-base Matrix Authorization Strategy' from the 'Authorization' options.
-Here you can grant read-only access to anonymous users (Overall/Read, Job/Discover and Job/Read should be enough) and, as an example, you can refer to all logged in user as the group 'authenticated' and grant full access.
+1. Install the https://wiki.jenkins-ci.org/display/JENKINS/Matrix+Authorization+Strategy+Plugin[Matrix Authorization Strategy Plugin] and restart Jenkins
+1. Go to http://localhost:8080/configureSecurity/ ('Configure Global Security' page under 'Manage Jenkins') and select 'Project-base Matrix Authorization Strategy' from the 'Authorization' options.
+1. As an example, you can grant read-only access to anonymous users (Overall/Read, Job/Discover and Job/Read should be enough) and grant all logged in users full access in a  group called 'authenticated':
 
 image::/images/post-images/2017-04-30/auth-matrix.png[role=center,1000]
 
-== JNLP
-Since the Jenkins instance is now accessible just through the reverse proxy on port 80 it means that Jenkins agents that want to register to the master through the JNLP protocol won't be able to do that anymore. To overcome this problem, you'll have to make sure the agents are in the same virtual network as the Jenkins master and connect using its private IP (the NSG rules allow all internal traffic).
+== Connect JNLP-based agents
+Since your Jenkins instance is only accessible through the reverse proxy on port 80, any Jenkins agents that use the JNLP protocol will not be able to register to the master anymore. To overcome this problem, all agents must be in the same virtual network as the Jenkins master and must connect using their private IP (by default, the NSG allows all internal traffic).
 
-First you need to make sure that the Jenkins virtual machine will always be assigned the same private IP. Go to the https://portal.azure.com/[Azure Portal], open the Network Interface of your virtual machine and from 'IP configuration' click on the configuration. There make sure the Private IP has a static assignment. You may need to restart the virtual machine.
+1. Make sure that the Jenkins virtual machine will always be assigned the same private IP by going to the https://portal.azure.com/[Azure Portal], opening the Network Interface of your virtual machine, opening 'IP configuration', and clicking on the configuration.
+1. Make sure the Private IP has a static assignment and restart the virtual machine if necessary.
 
 image::/images/post-images/2017-04-30/private-ip.png[role=center]
 
-After the private IP was set to static assignment, copy it and go to http://localhost:8080/configure ('Configure System' page in 'Manage Jenkins') and update the 'Jenkins URL' to point to that private IP - in this example that would be 'http://10.0.0.5:8080/'
+1. Copy the static IP Address and go to http://localhost:8080/configure ('Configure System' page under 'Manage Jenkins') and update the 'Jenkins URL' to point to that private IP ('http://10.0.0.5:8080/' in this example)
 
-Now you can set up agents that can communicate through JNLP, or if you want to streamline the process, you can use the https://wiki.jenkins-ci.org/display/JENKINS/Azure+VM+Agents+plugin[Azure VM Agents plugin] that will enable you to automatically deploy agents in the same virtual network and will handle the JNLP connection for you.
-
-== Azure QuickStart Template
-
-If you need a fast and automatic way for configuring all the steps listed above, you can use one of these Azure QuickStart templates:
-
-* https://aka.ms/101-jenkins-ssh[Template for deploying a Jenkins instance on a Virtual Machine that's using SSH public key authentication]
-* https://aka.ms/101-jenkins-pwd[Template for deploying a Jenkins instance on a Virtual Machine that's user name and password authentication]
+Now agents can communicate through JNLP. If you want to streamline the process, you can use the https://wiki.jenkins-ci.org/display/JENKINS/Azure+VM+Agents+plugin[Azure VM Agents plugin], which automatically deploys agents in the same virtual network and connects them to the master.
